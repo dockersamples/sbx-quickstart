@@ -20,7 +20,7 @@ By the end of this guide you'll be able to:
 - Install and configure the `sbx` CLI
 - Run Claude autonomously inside an isolated microVM sandbox
 - Store credentials securely and have them injected automatically
-- Use branch mode to let Claude work on its own Git branch without touching your working tree
+- Use clone mode to let Claude work on its own Git clone and branches without touching your working tree
 - Run multiple agents in parallel on the same repo
 - Forward live ports from a sandbox to your browser
 - Manage network policies so Claude can only reach what you allow
@@ -43,7 +43,7 @@ of intentional bugs and unfinished features that make ideal exercises for Claude
 6. [Orient yourself](#6-orient-yourself)
 7. [The interactive TUI dashboard](#7-the-interactive-tui-dashboard)
 8. [Run tests and fix bugs](#8-run-tests-and-fix-bugs)
-9. [Branch mode and parallel agents](#9-branch-mode-and-parallel-agents)
+9. [Clone mode and parallel agents](#9-clone-mode-and-parallel-agents)
 10. [Docker Compose inside the sandbox](#10-docker-compose-inside-the-sandbox)
 11. [Port forwarding with `sbx ports`](#11-port-forwarding-with-sbx-ports)
 12. [Network policies](#12-network-policies)
@@ -392,58 +392,111 @@ and reconnect to `quickstart`, you won't need to `pip install` again.
 
 ---
 
-## 9. Branch mode and parallel agents
+## 9. Clone mode and parallel agents
 
-### Direct mode vs. branch mode
+### Direct mode vs. clone mode
 
 Everything in section 8 ran in **direct mode** — Claude edited your working tree and
 you could see the changes immediately. That's great for interactive work.
 
-**Branch mode** gives Claude its own Git worktree and branch, isolated from your main
-working tree. You keep working normally; Claude works on its branch; you review the
-diff and merge when you're happy. Use it when you want a clean diff to review before
-anything lands, or when running multiple agents simultaneously.
+**Clone mode** gives Claude its own private Git clone of your repo inside the
+sandbox. Your repo is mounted **read-only** (at `/run/sandbox/source`), Claude edits
+and commits in its clone, and nothing reaches your working tree until you fetch it.
+Use it when you want a clean set of commits to review before anything lands, or when
+running several tasks at once.
 
-### Single branch: working in isolation
+|                  | Direct mode (section 8) | Clone mode                              |
+|------------------|-------------------------|-----------------------------------------|
+| Claude edits     | Your working tree       | A private Git clone inside the sandbox  |
+| You see changes  | Immediately             | After `git fetch sandbox-<name>`        |
+| How to enable    | Default                 | `--clone`, at creation time only        |
+
+A few rules to know before you start:
+
+- **Clone mode is fixed at creation.** You can't switch `quickstart` to clone mode,
+  so you'll create a second sandbox for this section.
+- **The clone follows the branch you have checked out** when you create the sandbox.
+  It's a Git clone, so it only contains **committed** work. Uncommitted changes and
+  untracked files (such as a `CLAUDE.md` you copied in section 5) aren't in it.
+- **Your host repo gets a `sandbox-<name>` remote** for fetching Claude's commits.
+  Fetching only works while the sandbox is running.
+- **`sbx rm` deletes the clone** and removes that remote. Fetch or push anything you
+  want to keep first.
+- Run `--clone` from your main checkout, not from inside a Git worktree.
+
+> **Note**: earlier versions of this guide used a `--branch` flag that created
+> worktrees under `.sbx/`. Current `sbx run` has no `--branch` flag — use clone mode
+> instead.
+
+### Single task: fix a bug on its own branch
 
 If you are currently in the sandbox **press `ctrl-c` twice to exit**
 
-Add `--branch` to put Claude on its own worktree. This works on your existing
-`quickstart` sandbox — no new sandbox is created:
+**Step 1 — Commit the section 8 fix to a branch.** The pagination fix from section 8
+is still uncommitted in your working tree, so a clone wouldn't see it. Save it on a
+new branch:
 
 ```bash
-sbx run quickstart --branch=fix-bugs
+cd ~/sbx-quickstart
+git checkout -b fix-bugs
+git commit -am "Fix pagination offset in list_issues()"
 ```
 
-> **Tip**: You don't have to name the branch yourself. `--branch auto` lets `sbx` generate a name for you — handy when you just want isolation without thinking about branch names.
+> **Note**: `git commit -am` commits changes to files Git already tracks, so stray
+> files like a copied `CLAUDE.md` or a virtual environment aren't swept in. If Git
+> reports `nothing to commit`, the fix isn't in your working tree — that's fine,
+> carry on.
 
-`sbx` creates a worktree under `.sbx/quickstart-worktrees/fix-bugs` in your repo root.
+**Step 2 — Create a clone-mode sandbox.** With `fix-bugs` still checked out:
+
+```bash
+sbx create --clone --name quickstart-clone claude .
+sbx ls
+```
+
+You now have two sandboxes: `quickstart` (direct mode) and `quickstart-clone`
+(clone mode).
+
+**Step 3 — Give Claude the task:**
+
+```bash
+sbx run quickstart-clone
+```
+
+If Claude asks you to sign in, run `/login` as in section 5. Your GitHub token is
+already available — stored secrets are global by default.
 
 Give Claude the following prompt:
 
 ```
-One test is still failing after the direct-mode fix. The updated_at field in backend/app/models.py
-never changes on update. Fix the bug and commit with a descriptive message.
+You're working on the fix-bugs branch. One test is still failing: the updated_at
+field in backend/app/models.py never changes on update. Set up the Python
+environment, fix the bug, run the backend tests to confirm, and commit to
+fix-bugs with a descriptive message.
 ```
 
-Monitor **from a second terminal** without interrupting the session
+This is a fresh sandbox, so Claude has to install the Python dependencies again —
+expect it to take a few minutes.
 
-You can find the worktree directory under your your workspace, as well as through git. 
+**Step 4 — Review from a second terminal.** Leave the session running. Your working
+tree hasn't changed — Claude's commit lives only in the clone until you fetch it:
 
 ```bash
 cd ~/sbx-quickstart
 
-ls ./.sbx/
+git fetch sandbox-quickstart-clone
 
-git worktree list
+git log --oneline fix-bugs..sandbox-quickstart-clone/fix-bugs
+
+git diff fix-bugs..sandbox-quickstart-clone/fix-bugs
 ```
 
-When you're ready to review and open a PR:
+**Step 5 — Bring it in and open a PR:**
 
 ```bash
-git diff main..fix-bugs
+git merge --ff-only sandbox-quickstart-clone/fix-bugs
 
-git push origin fix-bugs
+git push -u origin fix-bugs
 
 gh pr create \
   --head fix-bugs \
@@ -453,9 +506,10 @@ gh pr create \
 
 ### Parallel agents
 
-Because each branch-mode run creates its own worktree, you can run multiple agents
-simultaneously with no conflicts. The key is giving each agent its task up front via
-a prompt file — this lets both fire off without any interactive back-and-forth.
+One clone-mode sandbox can hold many branches, but **branches alone don't isolate
+work** — two tasks editing the same working directory would trample each other. The
+fix is to give each task its own **Git worktree** inside the sandbox. (If tasks also
+need separate tools or running services, use separate sandboxes instead.)
 
 DevBoard has two unimplemented features that make ideal parallel tasks:
 
@@ -463,36 +517,52 @@ DevBoard has two unimplemented features that make ideal parallel tasks:
 - **Notifications** — `send_status_change_notification()` is a no-op stub; it needs to actually send emails on issue status changes
 
 The `prompts/` directory in this repo includes a ready-made prompt file for each.
-Launch both agents, each in its own terminal:
+Back in the `quickstart-clone` session (reconnect with `sbx run quickstart-clone` if
+you exited), give Claude the following prompt:
 
-**Terminal 1:**
+```
+Implement two independent features at the same time, each in its own Git
+worktree so they never share a working directory:
 
-```bash
-sbx run quickstart --branch=add-search -- "$(cat prompts/implement-search.txt)"
+1. Run git fetch origin.
+2. Create the worktree /home/agent/worktrees/add-search on a new branch
+   add-search from origin/main, and follow prompts/implement-search.txt there.
+3. Create the worktree /home/agent/worktrees/add-notif on a new branch
+   add-notif from origin/main, and follow prompts/implement-notifications.txt there.
+
+Use a separate subagent for each feature so they run in parallel. When a
+feature's tests pass, commit it on its branch. Report both branch names when done.
 ```
 
-**Terminal 2:**
+Both branches start from `origin/main` (your fork on GitHub), so they don't include
+the `fix-bugs` commits. Each subagent works in its own worktree, so they read and write
+completely separate copies of the code with no conflicts. You'll still see only one
+entry in `sbx ls`.
+
+> **Tip**: you can also hand Claude its task when the session starts. Put Claude's
+> permission flag **first** — when the first argument after `--` is a prompt rather
+> than a flag, it replaces the agent's default startup flags, and Claude would start
+> without `--dangerously-skip-permissions`:
+>
+> ```bash
+> sbx run quickstart-clone -- --dangerously-skip-permissions "$(cat prompts/implement-search.txt)"
+> ```
+>
+> The `"$(cat ...)"` must be quoted or the prompt won't be passed correctly to the
+> sandbox.
+
+When both are done, review each branch and open PRs (make sure you are in `~/sbx-quickstart`):
 
 ```bash
-sbx run quickstart --branch=add-notif -- "$(cat prompts/implement-notifications.txt)"
-```
+git checkout main
 
-> **Note**: the `"$(cat ...)"` must be quoted or the prompt won't be passed correctly
-> to the sandbox.
+git fetch sandbox-quickstart-clone
 
-Both commands run against the same `quickstart` sandbox — no new sandbox is created.
-Each gets its own isolated Git worktree under `.sbx/quickstart-worktrees/`, so they
-read and write completely separate copies of the code with no conflicts. You'll still
-see only one entry in `sbx ls`.
+git diff main..sandbox-quickstart-clone/add-search
 
-Each agent reads its prompt and gets to work independently. You can watch each agent's progress in its own terminal.
+git checkout -b add-search sandbox-quickstart-clone/add-search
 
-When both are done, review each branch and open PRs (make sure you are in `~/sbx-quickstart`:
-
-```bash
-git diff main..add-search
-
-git push origin add-search
+git push -u origin add-search
 
 gh pr create --head add-search \
   --title "Implement issue search" \
@@ -500,14 +570,30 @@ gh pr create --head add-search \
 ```
 
 ```bash
-git diff main..add-notif
+git diff main..sandbox-quickstart-clone/add-notif
 
-git push origin add-notif
+git checkout -b add-notif sandbox-quickstart-clone/add-notif
+
+git push -u origin add-notif
 
 gh pr create --head add-notif \
   --title "Implement status change notifications" \
   --body "Implement status change notifications"
 ```
+
+### Clean up
+
+All three branches are pushed, so you can remove the clone-mode sandbox. Switch back
+to `main` first — the rest of the guide uses the direct-mode `quickstart` sandbox:
+
+```bash
+git checkout main
+
+sbx stop quickstart-clone
+sbx rm quickstart-clone
+```
+
+`sbx rm` deletes the sandbox, its clone, and the `sandbox-quickstart-clone` remote.
 
 ---
 
@@ -671,7 +757,7 @@ Useful patterns: a shared `libs/` repo the agent can reference, `docs/` alongsid
 
 Workspaces are configured at creation time — you can't add mounts to an existing sandbox. That means we need to recreate `quickstart`.
 
-> **Warning**: `sbx rm` permanently deletes the sandbox and all its Git worktrees under `.sbx/`. By this point in the guide you've already pushed your branches to remote and opened PRs, so the local worktrees are safe to lose. Your source files in `~/sbx-quickstart` are untouched — only the sandbox VM and worktrees are removed.
+> **Warning**: `sbx rm` permanently deletes the sandbox VM and everything inside it — installed packages, containers, and images. Your source files in `~/sbx-quickstart` are untouched, and the branches from section 9 are already pushed to your fork.
 
 ```bash
 sbx stop quickstart
@@ -923,13 +1009,14 @@ Rules:
 # ── Lifecycle ──────────────────────────────────────────────────────────────────
 sbx run --name=quickstart claude         # create and attach to a named sandbox
 sbx run quickstart                       # reconnect to an existing sandbox
-sbx run quickstart --branch=my-feature   # branch mode — Claude works on own worktree
-sbx run quickstart --branch=my-feature \
-  -- "$(cat p.txt)"                      # pass a prompt from a file (quotes required)
 sbx create [AGENT] [WORKSPACE]           # create without attaching
+sbx create --clone --name=quickstart-clone claude .   # clone mode — private Git clone
+sbx run quickstart-clone -- --dangerously-skip-permissions \
+  "$(cat p.txt)"                         # start with a prompt (flag first; quotes required)
+git fetch sandbox-quickstart-clone       # fetch clone-mode commits  [host terminal]
 sbx ls                                   # list sandboxes
 sbx stop quickstart                      # pause (preserves installed packages)
-sbx rm quickstart                        # delete sandbox + VM + worktrees
+sbx rm quickstart                        # delete sandbox + VM (clone mode: also its clone)
 
 # ── Attach & shell ─────────────────────────────────────────────────────────────
 sbx exec -it quickstart bash             # shell inside sandbox  [host terminal]
