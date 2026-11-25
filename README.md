@@ -12,6 +12,7 @@
 - A paid Claude subscription
 - A GitHub account with a token that has permissions to push and pull
 - macOS on Apple Silicon or Windows 11
+- *(Optional, for section 15)* VS Code with the Remote - SSH extension, or Cursor
 
 ## What you'll learn
 
@@ -25,6 +26,7 @@ By the end of this guide you'll be able to:
 - Forward live ports from a sandbox to your browser
 - Manage network policies so Claude can only reach what you allow
 - Mount multiple workspaces and debug inside a running sandbox
+- SSH into a sandbox and connect your IDE to it, so your editor's extensions, terminals, and tasks run inside the sandbox instead of on your host
 
 The guide uses **DevBoard** — a full-stack Next.js + FastAPI issue tracker included
 alongside this file (`backend/`, `frontend/`, `docker-compose.yml`). DevBoard has
@@ -49,10 +51,11 @@ of intentional bugs and unfinished features that make ideal exercises for Claude
 12. [Network policies](#12-network-policies)
 13. [Multiple workspaces](#13-multiple-workspaces)
 14. [Debugging with `sbx exec`](#14-debugging-with-sbx-exec)
-15. [Custom templates](#15-custom-templates)
-16. [Appendix A: Prompt library](#appendix-a-prompt-library)
-17. [Appendix B: CLI quick reference](#appendix-b-cli-quick-reference)
-18. [Appendix C: Troubleshooting](#appendix-c-troubleshooting)
+15. [Connect your IDE over SSH](#15-connect-your-ide-over-ssh)
+16. [Custom templates](#16-custom-templates)
+17. [Appendix A: Prompt library](#appendix-a-prompt-library)
+18. [Appendix B: CLI quick reference](#appendix-b-cli-quick-reference)
+19. [Appendix C: Troubleshooting](#appendix-c-troubleshooting)
 
 ---
 
@@ -867,7 +870,405 @@ subsequent sessions.
 
 ---
 
-## 15. Custom templates
+## 15. Connect your IDE over SSH
+
+Up to now you've watched Claude's edits from an editor running on your host. That
+works, but it means your editor — and everything it launches — runs on your host
+with your privileges: extensions, language servers, linters, debuggers, the
+integrated terminal, and any `.vscode/tasks.json` task. All of it reads and runs
+files that an autonomous agent can write.
+
+> **Why this matters**: Docker's sandbox security docs list IDE configuration
+> (`.vscode/tasks.json`, `.idea/` run configurations) among the files that can
+> execute code when you open a project in an IDE. An agent with write access to
+> your workspace can create or change those files. If your IDE runs inside the
+> sandbox, those tasks run in the microVM, not on your machine.
+
+`sbx` can make every sandbox reachable over SSH as `<sandbox-name>.sbx`. Point an
+IDE that does remote development over SSH, such as VS Code or Cursor, at that host.
+The editor window stays on your host. Its server, extensions, terminals, and tasks
+run inside the sandbox, next to Claude:
+
+```
+Your machine
+├── IDE window (UI only)          ← you type and read here
+├── ssh client ──► ProxyCommand "sbx ssh proxy"
+│                          │  local socket / named pipe
+│                          ▼  (no network port, no SSH key)
+├── sbx daemon             ← SSH ends here; requires an active `sbx login`
+│
+└── Sandbox (microVM)
+    ├── IDE server + extensions   ← run here
+    ├── Integrated terminal       ← runs here, under your network policy
+    ├── Private Docker daemon
+    └── /your/workspace           ← the same mount Claude uses
+```
+
+> **Status**: SSH access is marked **experimental** in the `sbx` CLI. It requires
+> Docker Sandboxes **0.37.0 or later**. This section was checked against **v0.54.1**.
+> Commands and behavior may change between releases.
+
+### How the connection works
+
+You don't need to manage keys, ports, or an SSH server:
+
+- **No network port and no SSH key.** A `ProxyCommand` sends the SSH stream to
+  the `sbx` daemon over a local socket (a Unix domain socket on macOS, a named pipe
+  on Windows). The daemon accepts the connection only while you're signed in with
+  `sbx login`. Authentication is tied to that login, not to a stored key.
+- **No SSH server in the sandbox.** SSH terminates at the daemon, which then
+  opens your session inside the sandbox.
+- **No host identity leaks.** You log in as the sandbox image's default user
+  (`agent`, home `/home/agent`). Your host username is never sent.
+- **Stopped sandboxes start themselves.** Connecting to a stopped sandbox starts
+  it. The sandbox must already exist, though.
+- **Your environment stays on the host.** The sandbox doesn't receive environment
+  variables from your SSH client.
+
+### Step 1 — Check your version
+
+```bash
+sbx version
+```
+
+If it's older than 0.37.0, upgrade first:
+
+```bash
+brew upgrade docker/tap/sbx       # macOS
+```
+
+```powershell
+winget upgrade Docker.sbx         # Windows
+```
+
+**Windows only**: check that the OpenSSH client is installed:
+
+```powershell
+ssh -V
+```
+
+If `ssh` isn't found, install it from an elevated PowerShell. `sbx` works with
+both native Windows OpenSSH and the OpenSSH bundled with Git Bash.
+
+```powershell
+Add-WindowsCapability -Online -Name OpenSSH.Client~~~~0.0.1.0
+```
+
+### Step 2 — Enable SSH access (one time)
+
+From a host terminal:
+
+```bash
+sbx setup ssh
+```
+
+This command starts the `sbx` daemon if it isn't running and configures your
+SSH client. It writes a managed config block and adds an `Include` for it to your
+SSH config: `~/.ssh/config` on macOS, `%USERPROFILE%\.ssh\config` on Windows. The
+block looks like this (paths depend on your installation):
+
+```text
+# >>> docker sandboxes (managed) >>>
+Match originalhost "*.sbx,!*'*"
+    User _default_user_
+    ProxyCommand "sbx" ssh proxy '%n'
+    IdentityAgent none
+    IdentityFile /dev/null
+    IdentitiesOnly yes
+    ControlMaster no
+    ControlPath none
+    UserKnownHostsFile "~/.ssh/sbx_known_hosts"
+    KnownHostsCommand "sbx" ssh known-hosts %H
+    StrictHostKeyChecking yes
+# <<< docker sandboxes (managed) <<<
+```
+
+Don't edit this block by hand. Some details worth knowing:
+
+- `Match originalhost "*.sbx,..."` applies to any hostname ending in `.sbx`.
+  Because it's a `Match` block, not a `Host` entry, **IDE host pickers won't list
+  your sandboxes**. Type the hostname yourself.
+- `IdentityAgent none` and `IdentityFile /dev/null` mean your personal SSH keys
+  are never offered to the sandbox connection.
+- `KnownHostsCommand` checks the host key on every connection, so if the daemon
+  rotates its key you won't get a host-key mismatch.
+
+> **Important**: rerun `sbx setup ssh` after **every** `sbx` upgrade. v0.54.0
+> hardened the generated config, so configs written by older versions must be
+> regenerated. The command is idempotent, so running it again is safe.
+
+### Step 3 — Connect from a terminal first
+
+Test SSH from a plain terminal before you add an IDE. Then, if something fails,
+you'll know whether the problem is SSH or the editor.
+
+Confirm the sandbox exists. If you followed section 13, that's the recreated
+`quickstart` with `backend` (read/write) and `frontend` (read-only) mounted:
+
+```bash
+sbx ls
+```
+
+Connect:
+
+```bash
+ssh quickstart.sbx
+```
+
+You're now in a shell inside the microVM. An interactive SSH shell starts in the
+sandbox's **primary workspace**, just like `sbx exec`. Look around:
+
+```bash
+pwd          # the primary workspace path — write this down, you'll open it in your IDE
+whoami       # agent — the sandbox user, not your host account
+echo $HOME   # /home/agent — not your host home directory
+docker ps    # the sandbox's private Docker daemon, not your host's
+```
+
+Type `exit` to leave. Like `sbx exec`, closing SSH doesn't stop the sandbox or
+Claude's session.
+
+You can also run a single command without opening a shell. This one prints the
+microVM's own kernel, not your host's:
+
+```bash
+ssh quickstart.sbx -- uname -a
+```
+
+> **Note**: `.sbx` names exist only in your SSH config, not in DNS. They work in
+> tools that use your OpenSSH config (`ssh`, VS Code, Cursor). They don't work in
+> a browser or with `ping`.
+
+### Step 4 — Connect VS Code
+
+**Install the Remote - SSH extension** (`ms-vscode-remote.remote-ssh`) from the
+Extensions view, or from a terminal:
+
+```bash
+code --install-extension ms-vscode-remote.remote-ssh
+```
+
+**Connect to the sandbox:**
+
+1. Open the Command Palette (`Cmd+Shift+P` on macOS, `Ctrl+Shift+P` on Windows)
+   and run **Remote-SSH: Connect to Host...**
+2. Type `quickstart.sbx` and press `Enter`. It isn't in the list (see Step 2),
+   so you have to type it.
+3. If VS Code asks for the remote platform, choose **Linux**.
+4. On the first connection, VS Code installs its server inside the sandbox,
+   which takes a moment. Later connections are faster.
+
+The remote indicator in the bottom-left corner now shows **SSH: quickstart.sbx**.
+
+**Open the workspace folder:**
+
+VS Code connects to the sandbox but may not open your project. It often opens
+the sandbox user's home directory, `/home/agent`. Choose the folder yourself:
+
+1. **File > Open Folder...**
+2. Enter the path that `pwd` printed in Step 3. For this guide on macOS, that's
+   `/Users/<you>/sbx-quickstart/backend`. Workspaces are mounted at their host
+   path.
+3. Click **OK**.
+
+> **Gotcha**: don't type `~/sbx-quickstart/...` in the remote folder picker. Inside
+> the sandbox, `~` is `/home/agent`, not your host home directory. Use the absolute
+> path from `pwd`.
+
+> **Tip (macOS)**: if the `code` command is on your PATH, open the project in
+> the sandbox in one step from a host terminal. Your host shell expands `$HOME`
+> to `/Users/<you>`, which is also the path the sandbox uses:
+>
+> ```bash
+> code --remote ssh-remote+quickstart.sbx "$HOME/sbx-quickstart/backend"
+> ```
+
+### Step 5 — Prove you're inside the sandbox
+
+Open a terminal in VS Code (**Terminal > New Terminal**) and run:
+
+```bash
+echo $HOME     # /home/agent
+docker ps      # sandbox containers, not your host's
+```
+
+This terminal is a shell inside the microVM. Everything you run in it is subject
+to the sandbox's network policy (section 12), the same as Claude.
+
+**Work side by side with Claude.** In a host terminal, attach to the agent:
+
+```bash
+sbx run quickstart
+```
+
+Give Claude the following prompt:
+
+```
+Add a module-level docstring to app/models.py that summarizes each model
+and its relationships. Don't change any code.
+```
+
+Open `app/models.py` in VS Code and watch the docstring appear. Claude and your
+IDE are now both working inside the same sandbox on the same files. Nothing your
+editor runs touches your host.
+
+**See read-only mounts apply to your IDE too:**
+
+1. **File > Add Folder to Workspace...** → `/Users/<you>/sbx-quickstart/frontend`
+2. Open any file under `frontend/src`, change it, and save.
+
+The save fails with a read-only file system error. The `:ro` mount from section 13
+applies to everything in the sandbox, and your IDE is now in the sandbox. Undo the
+change and close the file.
+
+### Step 6 — Forward ports through SSH
+
+Section 11 published sandbox ports with `sbx port publish`. That only works when
+the server binds to `0.0.0.0`. SSH port forwarding is different: it connects to the
+sandbox's **loopback** interface, so a dev server on `127.0.0.1` works without
+changes.
+
+In the VS Code terminal, start a throwaway server that listens **only** on
+loopback:
+
+```bash
+python3 -m http.server 8765 --bind 127.0.0.1
+```
+
+VS Code usually detects the port and forwards it for you. If it doesn't, open the
+**Ports** panel, click **Forward a Port**, and enter `8765`. Then open the
+**Forwarded Address** shown in the panel in your host browser. VS Code may choose
+a different host port if `8765` is already taken. Press `Ctrl-C` in the terminal to
+stop the server.
+
+The same works without an IDE, from a host terminal:
+
+```bash
+ssh -N -L 8765:127.0.0.1:8765 quickstart.sbx
+```
+
+| | `sbx port publish` (section 11) | SSH forwarding |
+|---|---|---|
+| Service must bind to | `0.0.0.0` | `127.0.0.1` / `localhost` / `::1` |
+| Lasts | Until you unpublish it or remove the sandbox (re-published on restart) | Until the SSH connection closes |
+| Best for | Long-running previews, sharing a stable port | Day-to-day IDE work |
+
+> **Gotcha**: the daemon forwards only to loopback addresses **inside** the sandbox.
+> Your SSH client chooses where the **host** side listens. Keep it on `127.0.0.1`.
+> If you set your client to listen on a non-loopback address, other machines on
+> your network may be able to reach the forwarded service.
+
+When you're done, close the remote window (**File > Close Remote Connection**).
+The sandbox keeps running.
+
+### Other editors and apps
+
+- **Cursor** is built on VS Code and connects the same way. Run
+  **Remote-SSH: Connect to Host**, type `quickstart.sbx`, and open the workspace
+  path from Step 3.
+- **Other SSH-capable tools.** Once SSH is set up, `<name>.sbx` works like any
+  other SSH host, so any tool that does remote development over your OpenSSH
+  config can connect. Remember to type the hostname yourself.
+- **Claude Desktop and ChatGPT** (macOS and Windows, v0.48.0 or later). Launch
+  each app once, quit them, then run `sbx setup ssh --auto-create`. This adds a
+  *Docker Sandbox (Claude)* connection (`claude.sbx`) and a *Docker Sandbox
+  (Codex)* connection (`codex.sbx`). Each creates its own sandbox the first time
+  you use it (`ssh-claude` and `ssh-codex`). These sandboxes have **no host
+  workspace**: clone your project inside them and push your changes to get them
+  out.
+- **Cloud sandboxes** use a separate alias. Run `sbx --cloud setup ssh`, then
+  `ssh <sandbox-id>@sbx_cloud` with the `sbx_`-prefixed ID from `sbx --cloud ls`.
+
+### What SSH isolates — and what it doesn't
+
+| | IDE on your host (sections 8–14) | IDE over SSH |
+|---|---|---|
+| Extensions, language servers, linters | Run on your host | Run in the sandbox |
+| Terminal, tasks, debugger | Run on your host, with no network policy | Run in the sandbox, with your network policy |
+| Your SSH keys and host home directory | Available to whatever the IDE runs | Not offered or mounted |
+| Workspace files (direct mode) | Your host files | **Still your host files**, through the same mount |
+
+Some things still cross the boundary:
+
+- **Files.** SSH moves *execution* into the sandbox. It doesn't change the
+  workspace mount. In direct mode, every edit made by you, your IDE, or Claude
+  lands on your host disk immediately. To isolate the files too, see the next
+  subsection.
+- **Forwarded ports.** Each forwarded port opens a listener on your host.
+- **Your SSH agent.** SSH agent forwarding into sandboxes is on by default, so
+  Git over SSH and commit signing work. Your private keys stay on the host, but
+  processes in the sandbox can ask your agent to sign. If you don't need that,
+  turn it off:
+
+  ```bash
+  sbx settings set ssh.agentForwardingEnabled false
+  sbx daemon restart
+  ```
+
+- **Extension and server downloads.** These go through your network policy. If
+  the first connection hangs or extensions won't install, run `sbx policy log`
+  and allow the VS Code hosts that were blocked (for example
+  `update.code.visualstudio.com` or `marketplace.visualstudio.com`).
+
+### Go further: isolate the files too (clone mode)
+
+For the strongest setup, combine SSH with **clone mode** from section 9. Your repo
+is mounted read-only, and the sandbox works on its own Git clone. Nothing reaches
+your host working tree until you fetch it.
+
+Clone mode is set when you create a sandbox, so create a fresh one (you removed
+`quickstart-clone` at the end of section 9). Run this from your main checkout, not
+from a worktree:
+
+```bash
+cd ~/sbx-quickstart
+sbx create --clone --name quickstart-ide claude .
+ssh quickstart-ide.sbx
+```
+
+Inside the sandbox, run `pwd`. The SSH shell starts in the primary workspace,
+which in clone mode is the sandbox's own clone. Note the path, then `exit`.
+
+Connect VS Code to `quickstart-ide.sbx` and open that path. Create a branch,
+make an edit, and commit in the VS Code terminal:
+
+```bash
+git checkout -b ide-edits
+git commit -am "Edit made from VS Code inside the sandbox"
+```
+
+> **Note**: if Git asks who you are, run `git config user.name "..."` and
+> `git config user.email "..."` in the same terminal and commit again.
+
+Back on the host, your working tree hasn't changed. Fetch the branch to review
+it. The sandbox must be running:
+
+```bash
+git fetch sandbox-quickstart-ide
+git diff main..sandbox-quickstart-ide/ide-edits
+```
+
+When you're done, remove the sandbox. This **deletes the clone**, so fetch or push
+anything you want to keep first:
+
+```bash
+sbx rm quickstart-ide
+```
+
+### Turning SSH access off
+
+To remove the managed SSH config and any desktop app connections:
+
+```bash
+sbx setup ssh remove
+```
+
+Your sandboxes aren't affected. Remove them separately with `sbx rm` if you no
+longer need them.
+
+---
+
+## 16. Custom templates
 
 > **Note**: This section is for reference only. Building custom templates requires Docker Desktop (or another Docker daemon) installed on your host machine — it is not something you do inside the sandbox.
 
@@ -1107,6 +1508,16 @@ sbx rm quickstart                        # delete sandbox + VM (clone mode: also
 sbx exec -it quickstart bash             # shell inside sandbox  [host terminal]
 sbx exec quickstart bash -c "cmd"        # one-off command        [host terminal]
 
+# ── SSH & IDE (experimental, v0.37.0+) ─────────────────────────────────────────
+sbx setup ssh                            # one-time SSH config for <name>.sbx (rerun after upgrades)
+ssh quickstart.sbx                       # shell inside sandbox over SSH
+ssh quickstart.sbx -- uname -a           # one-off command over SSH
+ssh -N -L 8765:127.0.0.1:8765 quickstart.sbx   # forward a sandbox loopback port
+code --remote ssh-remote+quickstart.sbx /abs/path/to/workspace   # VS Code in sandbox
+sbx setup ssh --auto-create              # Claude Desktop / ChatGPT connections (macOS/Windows)
+sbx setup ssh remove                     # remove managed SSH config; keeps sandboxes
+sbx --cloud setup ssh                    # cloud sandboxes → ssh <sandbox-id>@sbx_cloud
+
 # ── Port forwarding ────────────────────────────────────────────────────────────
 sbx port publish quickstart 8080:8000     # host:8080 → sandbox:8000
 sbx port publish quickstart 3000          # OS picks host port
@@ -1216,4 +1627,98 @@ Use the `-docker` template variant:
 
 ```bash
 sbx run --template docker.io/docker/sandbox-templates:claude-code-docker --name=quickstart claude
+```
+
+---
+
+### `ssh: Could not resolve hostname quickstart.sbx`
+
+Your SSH client isn't using the managed `sbx` config. Generate it:
+
+```bash
+sbx setup ssh
+```
+
+Also check that:
+
+- The sandbox name matches `sbx ls` exactly. The hostname is `<name>.sbx`.
+- You're using an OpenSSH client that reads your user SSH config (`~/.ssh/config`
+  on macOS, `%USERPROFILE%\.ssh\config` on Windows).
+
+---
+
+### SSH stopped working after upgrading `sbx`
+
+Each release can change the generated SSH config, and v0.54.0 requires a refresh.
+Regenerate it:
+
+```bash
+sbx setup ssh
+```
+
+---
+
+### SSH connection is rejected
+
+The daemon accepts SSH connections only while you have an active Docker login, and
+only to sandboxes that already exist:
+
+```bash
+sbx login
+sbx ls
+```
+
+---
+
+### VS Code: `Host key verification failed` or a `KnownHostsCommand` error
+
+VS Code can leave duplicate or broken managed blocks in your SSH config. Open
+`~/.ssh/config` (macOS) or `%USERPROFILE%\.ssh\config` (Windows) and delete **every**
+block between `# >>> docker sandboxes (managed) >>>` and
+`# <<< docker sandboxes (managed) <<<`, including both marker lines. Then
+regenerate it and reconnect:
+
+```bash
+sbx setup ssh
+```
+
+---
+
+### VS Code keeps reconnecting (macOS)
+
+Some VS Code versions get stuck in a reconnect loop on macOS. Add this to your
+VS Code **user** settings (`settings.json`):
+
+```json
+{
+  "remote.SSH.useLocalServer": false
+}
+```
+
+See [microsoft/vscode-remote-release#11672](https://github.com/microsoft/vscode-remote-release/issues/11672).
+
+---
+
+### VS Code hangs on first connect, or extensions won't install in the sandbox
+
+The VS Code server and extensions download from inside the sandbox, so your
+network policy applies to them. Find the blocked hosts and allow them:
+
+```bash
+sbx policy log quickstart
+sbx policy allow network update.code.visualstudio.com
+```
+
+---
+
+### VS Code opens `/home/agent` instead of my project
+
+This is expected. Editors often open the sandbox user's home directory. Use
+**File > Open Folder...** and enter the absolute workspace path. To find it,
+open an interactive SSH shell, which starts in the primary workspace, and run
+`pwd`:
+
+```bash
+ssh quickstart.sbx
+pwd
 ```
