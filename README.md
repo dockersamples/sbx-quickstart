@@ -842,8 +842,11 @@ Type `exit` to leave. The Claude session keeps running.
 
 ### Run a one-off command without opening a shell
 
+`sbx exec` starts in the sandbox's primary workspace. After section 13 that's
+`backend/`, so you can run the tests directly:
+
 ```bash
-sbx exec -it quickstart bash -c "cd backend && pytest tests/ -v --tb=short"
+sbx exec -it quickstart bash -c "pytest tests/ -v --tb=short"
 ```
 
 ### Set a persistent environment variable
@@ -852,9 +855,12 @@ Variables set inside the sandbox don't survive a restart. Write them to
 `/etc/sandbox-persistent.sh` to make them permanent for the sandbox's lifetime:
 
 ```bash
-sbx exec -d quickstart bash -c \
+sbx exec quickstart bash -c \
   "echo 'export SMTP_HOST=smtp.mailgun.org' >> /etc/sandbox-persistent.sh"
 ```
+
+> **Note**: `sbx exec` always runs in the foreground — detached mode (`-d`) isn't
+> supported. This command returns as soon as the line is written.
 
 The file is sourced on every login shell, so Claude will see the variable in
 subsequent sessions.
@@ -1046,7 +1052,7 @@ sbx rm quickstart                        # delete sandbox + VM (clone mode: also
 
 # ── Attach & shell ─────────────────────────────────────────────────────────────
 sbx exec -it quickstart bash             # shell inside sandbox  [host terminal]
-sbx exec -d quickstart bash -c "cmd"     # one-off command        [host terminal]
+sbx exec quickstart bash -c "cmd"        # one-off command        [host terminal]
 
 # ── Port forwarding ────────────────────────────────────────────────────────────
 sbx port publish quickstart 8080:8000     # host:8080 → sandbox:8000
