@@ -166,17 +166,17 @@ that needs authentication, the host-side proxy intercepts it and injects the cre
 automatically. Claude can make authenticated API calls but can never read, log, or
 exfiltrate the raw credential.
 
-Store your GitHub token **now**, before creating a sandbox. The `-g` flag makes it
-global — available to all sandboxes you create:
+Store your GitHub token **now**. Service secrets are **global by default** —
+available to every sandbox, including ones you create later:
 
 ```bash
-echo "$(gh auth token)" | sbx secret set -g github
+gh auth token | sbx secret set github
 ```
 
-> **Important**: global secrets must be set before a sandbox is created. They are
-> injected at creation time and cannot be added retroactively to a running sandbox.
-> Sandbox-scoped secrets (without `-g`) can be added at any time and override the
-> global value for that sandbox.
+> **Good to know**: adding, updating, or removing a secret takes effect in existing
+> sandboxes without a restart. To scope a secret to a single sandbox, add
+> `--sandbox <name>` (for example `sbx secret set openai --sandbox quickstart`).
+> Sandbox-scoped secrets take precedence over global ones.
 
 You can doublecheck that the credential was added. 
 
@@ -193,22 +193,28 @@ SCOPE      SERVICE   SECRET
 
 ### Supported services
 
-| Service     | Environment variable(s)                       | API domain(s)                       |
-|-------------|-----------------------------------------------|-------------------------------------|
-| `anthropic` | `ANTHROPIC_API_KEY`                           | `api.anthropic.com`                 |
-| `openai`    | `OPENAI_API_KEY`                              | `api.openai.com`                    |
-| `github`    | `GH_TOKEN`, `GITHUB_TOKEN`                    | `api.github.com`, `github.com`      |
-| `google`    | `GEMINI_API_KEY`, `GOOGLE_API_KEY`            | `generativelanguage.googleapis.com` |
-| `groq`      | `GROQ_API_KEY`                                | `api.groq.com`                      |
-| `mistral`   | `MISTRAL_API_KEY`                             | `api.mistral.ai`                    |
-| `nebius`    | `NEBIUS_API_KEY`                              | `api.studio.nebius.ai`              |
-| `xai`       | `XAI_API_KEY`                                 | `api.x.ai`                          |
-| `aws`       | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`  | AWS Bedrock endpoints               |
+| Service      | Environment variable(s)    | API domain(s)                                                                                       |
+|--------------|----------------------------|-----------------------------------------------------------------------------------------------------|
+| `anthropic`  | `ANTHROPIC_API_KEY`        | `api.anthropic.com`, `console.anthropic.com`, `claude.ai`, `mcp-proxy.anthropic.com`                |
+| `cursor`     | `CURSOR_API_KEY`           | `api2.cursor.sh`, `api3.cursor.sh`, `repo42.cursor.sh`, `cursor.com`                                |
+| `droid`      | `FACTORY_API_KEY`          | `api.factory.ai`, `app.factory.ai`, `relay.factory.ai`                                              |
+| `github`     | `GH_TOKEN`, `GITHUB_TOKEN` | `api.github.com`, `github.com`, `raw.githubusercontent.com`, `gist.github.com`, `copilot.github.com`, `api.githubcopilot.com` |
+| `google`     | `GOOGLE_API_KEY`           | `generativelanguage.googleapis.com`, `oauth2.googleapis.com`, `aiplatform.googleapis.com`, `vertexai.googleapis.com` |
+| `groq`       | `GROQ_API_KEY`             | `api.groq.com`                                                                                      |
+| `mistral`    | `MISTRAL_API_KEY`          | `api.mistral.ai`                                                                                    |
+| `nebius`     | `NEBIUS_API_KEY`           | `api.studio.nebius.com`, `api.tokenfactory.nebius.com`                                              |
+| `openai`     | `OPENAI_API_KEY`           | `api.openai.com`, `openai.com`, `chatgpt.com`, `www.chatgpt.com`                                    |
+| `openrouter` | `OPENROUTER_API_KEY`       | `openrouter.ai`                                                                                     |
+| `xai`        | `XAI_API_KEY`              | `api.x.ai`                                                                                          |
+
+`sbx secret set` also accepts `copilot` and `devin`, and kits can declare their own
+services. Run `sbx secret set --help` for the current list.
 
 For services not in this list, you can write values to `/etc/sandbox-persistent.sh`
 inside the sandbox via `sbx exec`. Unlike `sbx secret`, this stores the value inside
 the VM where the agent can read it directly — use only for tokens where proxy injection
-isn't needed.
+isn't needed. If you still want proxy injection, try the experimental
+`sbx secret set-custom`, which keys a secret to a domain and an environment variable.
 
 ---
 
@@ -947,10 +953,10 @@ sbx policy reset                                    # wipe rules, reprompt for p
 sbx policy set-default balanced                     # set default without prompt (CI)
 
 # ── Credentials ────────────────────────────────────────────────────────────────
-sbx secret set -g github                 # store GitHub token globally
-sbx secret set quickstart anthropic      # scope to one sandbox
+gh auth token | sbx secret set github    # store GitHub token (global by default)
+sbx secret set anthropic --sandbox quickstart   # scope to one sandbox
 sbx secret ls                            # list stored secrets
-sbx secret rm -g github                  # remove a secret
+sbx secret rm github                     # remove a global secret
 
 # ── Dashboard ──────────────────────────────────────────────────────────────────
 sbx                                      # open interactive TUI  [host terminal]
@@ -1002,12 +1008,9 @@ sbx login
    ```bash
    sbx policy allow network api.anthropic.com
    ```
-3. If you set a global secret while a sandbox was already running, the secret won't
-   be available — global secrets are injected at creation time. Recreate the sandbox:
-   ```bash
-   sbx rm quickstart
-   sbx run --name=quickstart claude
-   ```
+3. If you use an API key rather than `/login`, confirm it's stored with
+   `sbx secret ls`. Secrets take effect in existing sandboxes without a restart, so
+   you don't need to recreate the sandbox after adding one.
 
 ---
 
