@@ -871,7 +871,14 @@ subsequent sessions.
 
 > **Note**: This section is for reference only. Building custom templates requires Docker Desktop (or another Docker daemon) installed on your host machine — it is not something you do inside the sandbox.
 
-Every built-in agent template (`claude-code`, `codex`, `gemini`, etc.) is a plain Docker image. You can extend any of them to pre-bake toolchains, language runtimes, config files, or any other dependencies your project needs. Claude won't have to install them at the start of every session.
+Docker publishes sandbox templates as plain Docker images (`docker/sandbox-templates:<variant>`). You can extend one to pre-bake toolchains, language runtimes, config files, or any other dependencies your project needs. Claude won't have to install them at the start of every session.
+
+> **Good to know**: built-in agents such as `claude` now run from Debian-based kits
+> published at `docker.io/sbx/<name>:latest`. The Ubuntu-based
+> `docker/sandbox-templates` images are older, separate images that still work as
+> a `--template` base. For adding tools to a built-in agent, Docker now recommends
+> kit mixins — see [Base images](https://docs.docker.com/ai/sandboxes/customize/author/base-images/)
+> and [Customize sandboxes](https://docs.docker.com/ai/sandboxes/customize/).
 
 ### Create a Dockerfile
 
@@ -887,6 +894,9 @@ USER agent
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 ```
 
+> **Gotcha**: install agent-level tools as `agent`, not `root`. Installers run as
+> `root` put files under `/root/`, where the agent can't use them.
+
 ### Build and push
 
 ```bash
@@ -895,25 +905,68 @@ docker build -t my-org/my-template:v1 --push .
 
 Push to any registry Docker can pull from — Docker Hub, GHCR, ECR, etc.
 
+For **private** images, Docker Hub pulls reuse your `sbx login` session. Other
+registries need pull credentials stored first:
+
+```bash
+gh auth token | sbx secret set --registry ghcr.io --password-stdin
+```
+
+To skip the registry entirely, load a locally built image straight into the sandbox
+runtime:
+
+```bash
+docker image save my-org/my-template:v1 -o my-template.tar
+sbx template load my-template.tar
+sbx run --pull never -t my-org/my-template:v1 claude
+```
+
 ### Use your template
 
 ```bash
 sbx run --template docker.io/my-org/my-template:v1 claude
 ```
 
-The image is pulled and cached locally on first use. Subsequent sandbox starts reuse the cached image. If you update the image and want the new version, run `sbx reset` to clear the cache, or use a new tag.
+Unlike `docker`, `sbx` doesn't add `docker.io` to image references for you, so always
+use the full reference.
+
+When `sbx` creates a sandbox from a registry template, it pulls the image by default,
+so new sandboxes pick up an updated image pushed to the same tag. Existing sandboxes
+keep the image they were created with — recreate them to get the update. Using a new
+tag for each change (`v1`, `v2`, …) keeps this explicit.
+
+> **Warning**: don't use `sbx reset` to refresh a template. It resets Docker
+> Sandboxes to a freshly installed state: it deletes **all** sandboxes, stored
+> secrets, policy rules, and the managed SSH config, and signs you out.
+
+### Save a sandbox as a template (no Docker required)
+
+If you've already set up a sandbox the way you like it, snapshot its container
+filesystem instead of writing a Dockerfile:
+
+```bash
+sbx template save quickstart my-template:v1
+sbx run -t my-template:v1 claude
+```
+
+`sbx` asks to stop the sandbox if it's running. The snapshot doesn't include mounted
+workspaces or the sandbox's Docker images (`/var/lib/docker`). It **does** include
+any credentials written to the sandbox filesystem, so keep secrets in `sbx secret`,
+not in files, before you share a template.
 
 ### Available base images
 
-| Template | Includes |
-|----------|----------|
-| `docker/sandbox-templates:claude-code` | Claude Code, standard toolchain |
-| `docker/sandbox-templates:claude-code-docker` | Claude Code + Docker Engine (required for Docker Compose on Windows) |
-| `docker/sandbox-templates:codex` | OpenAI Codex |
-| `docker/sandbox-templates:gemini` | Gemini CLI |
-| `docker/sandbox-templates:shell` | Bare Bash — no agent pre-installed |
+| Image | Includes | Status |
+|-------|----------|--------|
+| `docker/sandbox-templates:claude-code` | Claude Code, standard toolchain | Rebuilt by Docker |
+| `docker/sandbox-templates:claude-code-minimal` | Claude Code, minimal toolset (no Node.js, Python, Go, or Java) | Rebuilt by Docker |
+| `docker/sandbox-templates:claude-code-docker` | Claude Code + Docker Engine | Rebuilt by Docker |
+| `docker/sandbox-templates:gemini`, `gemini-docker` | Gemini CLI (`-docker` adds Docker Engine) | Rebuilt by Docker |
+| `docker/sandbox-templates:codex`, `copilot`, `cursor-agent`, `devin`, `docker-agent`, `droid`, `kiro`, `opencode` | Other agents | Previously published; no longer rebuilt |
+| `docker.io/sbx/shell-image:latest` | Development environment, no agent pre-installed | Current |
+| `docker.io/sbx/shell-docker-image:latest` | Same, plus Docker Engine | Current |
 
-All base images include Ubuntu, Git, GitHub CLI, Node.js, Go, Python 3, and common package managers.
+The `docker/sandbox-templates` images are based on Ubuntu and run as a non-root `agent` user with sudo access. Most variants include Git, the Docker CLI, Node.js, Python, Go, and Java; full templates also include a C/C++ compiler toolchain.
 
 ---
 
@@ -1082,7 +1135,8 @@ sbx secret rm github                     # remove a global secret
 sbx                                      # open interactive TUI  [host terminal]
 
 # ── Reset ──────────────────────────────────────────────────────────────────────
-sbx reset                                # stop all VMs, delete all sandbox data
+sbx reset                                # ⚠ factory reset: deletes ALL sandboxes, secrets,
+                                         #   policies, SSH config; signs you out
 ```
 
 ---
