@@ -1,6 +1,10 @@
 # Docker Sandboxes: A Hands-On Guide with Claude
 
-> **Status**: This guide covers the Docker Sandboxes `sbx` 
+> **Status**: This guide covers the Docker Sandboxes `sbx` CLI and was last checked
+> against **v0.54.1** (November 2026). `sbx` changes quickly and some commands are
+> marked experimental. If something here doesn't match your version, check
+> `sbx <command> --help` and the [Docker Sandboxes docs](https://docs.docker.com/ai/sandboxes/).
+
 ---
 
 ## What you'll need
