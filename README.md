@@ -45,7 +45,7 @@ of intentional bugs and unfinished features that make ideal exercises for Claude
 8. [Run tests and fix bugs](#8-run-tests-and-fix-bugs)
 9. [Clone mode and parallel agents](#9-clone-mode-and-parallel-agents)
 10. [Docker Compose inside the sandbox](#10-docker-compose-inside-the-sandbox)
-11. [Port forwarding with `sbx ports`](#11-port-forwarding-with-sbx-ports)
+11. [Port forwarding with `sbx port`](#11-port-forwarding-with-sbx-port)
 12. [Network policies](#12-network-policies)
 13. [Multiple workspaces](#13-multiple-workspaces)
 14. [Debugging with `sbx exec`](#14-debugging-with-sbx-exec)
@@ -636,20 +636,23 @@ sandbox, all images, containers, and Postgres data are deleted automatically.
 
 ---
 
-## 11. Port forwarding with `sbx ports`
+## 11. Port forwarding with `sbx port`
 
 Sandboxes are network-isolated — your browser can't reach a server inside one by
-default. `sbx ports` punches a hole from a host port to a sandbox port.
+default. `sbx port publish` punches a hole from a host port to a sandbox port.
 
-> **Terminal note**: `sbx ports` is a host-side command. Run it in a new terminal tab
+> **Terminal note**: `sbx port` is a host-side command. Run it in a new terminal tab
 > while Claude is running
+
+> **Note**: v0.54.0 replaced `sbx ports` with `sbx port publish`, `sbx port ls`, and
+> `sbx port unpublish`. The old `sbx ports` command still works but is deprecated.
 
 ### Forward the API
 
 With the Docker Compose stack running from the previous section:
 
 ```bash
-sbx ports quickstart --publish 8080:8000
+sbx port publish quickstart 8080:8000
 ```
 
 Open `http://localhost:8080/docs` — that's the live Swagger UI running inside the sandbox.
@@ -657,34 +660,57 @@ Open `http://localhost:8080/docs` — that's the live Swagger UI running inside 
 ### Forward the frontend
 
 ```bash
-sbx ports quickstart --publish 3001:3000
+sbx port publish quickstart 3001:3000
 ```
 
 Open `http://localhost:3001` in your web browser to see the Web front-end
 
+> **Tip**: leave out the host port (`sbx port publish quickstart 3000`) and the OS
+> picks a free one. Use `sbx port ls` to see which port you got.
 
 ### Check active ports
 
 ```bash
-sbx ports quickstart
-
-HOST IP     HOST PORT   SANDBOX PORT   PROTOCOL
-127.0.0.1   3001        3000           tcp
-127.0.0.1   8080        8000           tcp
+sbx port ls quickstart
 ```
+
+`sbx ls` also shows each sandbox's mappings in its `PORTS` column, in the form
+`127.0.0.1:8080->8000/tcp4`. Published ports bind to `127.0.0.1` on your host by
+default, so only your machine can reach them.
 
 ### Stop forwarding
 
+Remove a single mapping:
+
 ```bash
-sbx ports quickstart --unpublish 8080:8000
+sbx port unpublish quickstart 8080:8000
 ```
 
-> **Gotcha**: services inside the sandbox must bind to `0.0.0.0`, not `127.0.0.1`.
-> Most dev servers default to `127.0.0.1` — that's why the prompt in section 10
-> explicitly asks Claude to bind to `0.0.0.0`.
+Or give only the sandbox port to remove every host mapping for it:
 
-> **Gotcha**: published ports don't survive a sandbox stop/restart. Re-run `sbx ports`
-> after restarting.
+```bash
+sbx port unpublish quickstart 8000
+```
+
+### Publish when you create a sandbox
+
+If you know the ports up front, publish them at creation time:
+
+```bash
+sbx run --publish 8080:8000 --name my-sandbox claude
+```
+
+`--publish` only applies when `sbx run` creates the sandbox. It's ignored when you
+reattach to an existing sandbox — use `sbx port publish` for that.
+
+> **Gotcha**: services inside the sandbox must bind to `0.0.0.0` (or `[::]`), not
+> `127.0.0.1`. Most dev servers default to `127.0.0.1` — that's why the prompt in
+> section 10 explicitly asks Claude to bind to `0.0.0.0`.
+
+> **Good to know**: published ports survive restarts — `sbx` re-publishes them when
+> the sandbox or the daemon restarts. An explicit host port (`8080:8000`) is reused;
+> an OS-picked host port changes on every start, so check `sbx port ls` after a
+> restart. Removing the sandbox releases its ports.
 
 ---
 
@@ -966,7 +992,7 @@ Start the full application stack with Docker Compose.
    Report the responses as JSON.
 
 Make sure any server you start binds to 0.0.0.0 (not 127.0.0.1) so I can
-reach it via sbx ports forwarding.
+reach it via sbx port publish.
 ```
 
 ---
@@ -1023,10 +1049,11 @@ sbx exec -it quickstart bash             # shell inside sandbox  [host terminal]
 sbx exec -d quickstart bash -c "cmd"     # one-off command        [host terminal]
 
 # ── Port forwarding ────────────────────────────────────────────────────────────
-sbx ports quickstart --publish 8080:8000   # host:8080 → sandbox:8000
-sbx ports quickstart --publish 3000        # OS picks host port
-sbx ports quickstart                       # show active forwarding rules
-sbx ports quickstart --unpublish 8080:8000 # stop forwarding
+sbx port publish quickstart 8080:8000     # host:8080 → sandbox:8000
+sbx port publish quickstart 3000          # OS picks host port
+sbx port ls quickstart                    # show published ports
+sbx port unpublish quickstart 8080:8000   # remove one mapping
+sbx port unpublish quickstart 8000        # remove every mapping for sandbox port 8000
 
 # ── Network policies ───────────────────────────────────────────────────────────
 sbx policy ls                                       # list active rules
@@ -1104,9 +1131,9 @@ sbx login
 ### Port forwarding isn't working
 
 - Confirm the service binds to `0.0.0.0`, not `127.0.0.1`
-- Published ports don't survive a restart — re-run `sbx ports` after `sbx stop`/`sbx run`
+- If you published without a host port, the host port changes on every start — check `sbx port ls quickstart`
 - Check the sandbox is still running: `sbx ls`
-- Make sure you're running `sbx ports` from a host terminal, not from inside the sandbox session
+- Make sure you're running `sbx port` from a host terminal, not from inside the sandbox session
 
 ---
 
