@@ -1122,8 +1122,8 @@ sbx policy allow network example.com                # allow a host
 sbx policy allow network "*.npmjs.org,*.pypi.org"    # allow multiple
 sbx policy deny network ads.example.com             # block a host
 sbx policy rm network --resource example.com        # remove a rule
-sbx policy reset                                    # wipe rules, reprompt for policy
-sbx policy set-default balanced                     # set default without prompt (CI)
+sbx policy reset                                    # wipe rules, restart daemon, reprompt
+sbx policy init balanced                            # set global policy without prompt (CI)
 
 # ── Credentials ────────────────────────────────────────────────────────────────
 gh auth token | sbx secret set github    # store GitHub token (global by default)
